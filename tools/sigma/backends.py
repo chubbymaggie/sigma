@@ -213,6 +213,111 @@ class RulenameCommentMixin:
             except KeyError:
                 return ""
 
+class SingleTextQueryBackend(RulenameCommentMixin, BaseBackend, QuoteCharMixin):
+    """Base class for backends that generate one text-based expression from a Sigma rule"""
+    identifier = "base-textquery"
+    active = False
+    output_class = SingleOutput
+
+    # the following class variables define the generation and behavior of queries from a parse tree some are prefilled with default values that are quite usual
+    andToken = None                     # Token used for linking expressions with logical AND
+    orToken = None                      # Same for OR
+    notToken = None                     # Same for NOT
+    subExpression = None                # Syntax for subexpressions, usually parenthesis around it. %s is inner expression
+    listExpression = None               # Syntax for lists, %s are list items separated with listSeparator
+    listSeparator = None                # Character for separation of list items
+    valueExpression = None              # Expression of values, %s represents value
+    nullExpression = None               # Expression of queries for null values or non-existing fields. %s is field name
+    notNullExpression = None            # Expression of queries for not null values. %s is field name
+    mapExpression = None                # Syntax for field/value conditions. First %s is key, second is value
+    mapListsSpecialHandling = False     # Same handling for map items with list values as for normal values (strings, integers) if True, generateMapItemListNode method is called with node
+    mapListValueExpression = None       # Syntax for field/value condititons where map value is a list
+
+    def generateANDNode(self, node):
+        return self.andToken.join([self.generateNode(val) for val in node])
+
+    def generateORNode(self, node):
+        return self.orToken.join([self.generateNode(val) for val in node])
+
+    def generateNOTNode(self, node):
+        return self.notToken + self.generateNode(node.item)
+
+    def generateSubexpressionNode(self, node):
+        return self.subExpression % self.generateNode(node.items)
+
+    def generateListNode(self, node):
+        if not set([type(value) for value in node]).issubset({str, int}):
+            raise TypeError("List values must be strings or numbers")
+        return self.listExpression % (self.listSeparator.join([self.generateNode(value) for value in node]))
+
+    def generateMapItemNode(self, node):
+        key, value = node
+        if self.mapListsSpecialHandling == False and type(value) in (str, int, list) or self.mapListsSpecialHandling == True and type(value) in (str, int):
+            return self.mapExpression % (key, self.generateNode(value))
+        elif type(value) == list:
+            return self.generateMapItemListNode(key, value)
+        else:
+            raise TypeError("Backend does not support map values of type " + str(type(value)))
+
+    def generateMapItemListNode(self, key, value):
+        return self.mapListValueExpression % (key, self.generateNode(value))
+
+    def generateValueNode(self, node):
+        return self.valueExpression % (self.cleanValue(str(node)))
+
+    def generateNULLValueNode(self, node):
+        return self.nullExpression % (node.item)
+
+    def generateNotNULLValueNode(self, node):
+        return self.notNullExpression % (node.item)
+
+class MultiRuleOutputMixin:
+    """Mixin with common for multi-rule outputs"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rulenames = set()
+
+    def getRuleName(self, sigmaparser):
+        """
+        Generate a rule name from the title of the Sigma rule with following properties:
+
+        * Spaces are replaced with -
+        * Unique name by addition of a counter if generated name already in usage
+
+        Generated names are tracked by the Mixin.
+
+        """
+        rulename = sigmaparser.parsedyaml["title"].replace(" ", "-").replace("(", "").replace(")", "")
+        if rulename in self.rulenames:   # add counter if name collides
+            cnt = 2
+            while "%s-%d" % (rulename, cnt) in self.rulenames:
+                cnt += 1
+            rulename = "%s-%d" % (rulename, cnt)
+        self.rulenames.add(rulename)
+
+        return rulename
+
+### Backends for specific SIEMs
+
+class ElasticsearchQuerystringBackend(SingleTextQueryBackend):
+    """Converts Sigma rule into Elasticsearch query string. Only searches, no aggregations."""
+    identifier = "es-qs"
+    active = True
+
+    reEscape = re.compile("([+\\-=!(){}\\[\\]^\"~:/]|\\\\(?![*?])|\\\\u|&&|\\|\\|)")
+    reClear = re.compile("[<>]")
+    andToken = " AND "
+    orToken = " OR "
+    notToken = "NOT "
+    subExpression = "(%s)"
+    listExpression = "(%s)"
+    listSeparator = " "
+    valueExpression = "\"%s\""
+    nullExpression = "NOT _exists_:%s"
+    notNullExpression = "_exists_:%s"
+    mapExpression = "%s:%s"
+    mapListsSpecialHandling = False
+
 class ElasticsearchDSLBackend(RulenameCommentMixin, BaseBackend):
     """ElasticSearch DSL backend"""
     identifier = 'es-dsl'
@@ -358,111 +463,6 @@ class ElasticsearchDSLBackend(RulenameCommentMixin, BaseBackend):
             self.output.print(json.dumps(query, indent=2))
             if self.output_type == 'curl':
                 self.output.print("'")
-
-class SingleTextQueryBackend(RulenameCommentMixin, BaseBackend, QuoteCharMixin):
-    """Base class for backends that generate one text-based expression from a Sigma rule"""
-    identifier = "base-textquery"
-    active = False
-    output_class = SingleOutput
-
-    # the following class variables define the generation and behavior of queries from a parse tree some are prefilled with default values that are quite usual
-    andToken = None                     # Token used for linking expressions with logical AND
-    orToken = None                      # Same for OR
-    notToken = None                     # Same for NOT
-    subExpression = None                # Syntax for subexpressions, usually parenthesis around it. %s is inner expression
-    listExpression = None               # Syntax for lists, %s are list items separated with listSeparator
-    listSeparator = None                # Character for separation of list items
-    valueExpression = None              # Expression of values, %s represents value
-    nullExpression = None               # Expression of queries for null values or non-existing fields. %s is field name
-    notNullExpression = None            # Expression of queries for not null values. %s is field name
-    mapExpression = None                # Syntax for field/value conditions. First %s is key, second is value
-    mapListsSpecialHandling = False     # Same handling for map items with list values as for normal values (strings, integers) if True, generateMapItemListNode method is called with node
-    mapListValueExpression = None       # Syntax for field/value condititons where map value is a list
-
-    def generateANDNode(self, node):
-        return self.andToken.join([self.generateNode(val) for val in node])
-
-    def generateORNode(self, node):
-        return self.orToken.join([self.generateNode(val) for val in node])
-
-    def generateNOTNode(self, node):
-        return self.notToken + self.generateNode(node.item)
-
-    def generateSubexpressionNode(self, node):
-        return self.subExpression % self.generateNode(node.items)
-
-    def generateListNode(self, node):
-        if not set([type(value) for value in node]).issubset({str, int}):
-            raise TypeError("List values must be strings or numbers")
-        return self.listExpression % (self.listSeparator.join([self.generateNode(value) for value in node]))
-
-    def generateMapItemNode(self, node):
-        key, value = node
-        if self.mapListsSpecialHandling == False and type(value) in (str, int, list) or self.mapListsSpecialHandling == True and type(value) in (str, int):
-            return self.mapExpression % (key, self.generateNode(value))
-        elif type(value) == list:
-            return self.generateMapItemListNode(key, value)
-        else:
-            raise TypeError("Backend does not support map values of type " + str(type(value)))
-
-    def generateMapItemListNode(self, key, value):
-        return self.mapListValueExpression % (key, self.generateNode(value))
-
-    def generateValueNode(self, node):
-        return self.valueExpression % (self.cleanValue(str(node)))
-
-    def generateNULLValueNode(self, node):
-        return self.nullExpression % (node.item)
-
-    def generateNotNULLValueNode(self, node):
-        return self.notNullExpression % (node.item)
-
-class MultiRuleOutputMixin:
-    """Mixin with common for multi-rule outputs"""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.rulenames = set()
-
-    def getRuleName(self, sigmaparser):
-        """
-        Generate a rule name from the title of the Sigma rule with following properties:
-
-        * Spaces are replaced with -
-        * Unique name by addition of a counter if generated name already in usage
-
-        Generated names are tracked by the Mixin.
-
-        """
-        rulename = sigmaparser.parsedyaml["title"].replace(" ", "-").replace("(", "").replace(")", "")
-        if rulename in self.rulenames:   # add counter if name collides
-            cnt = 2
-            while "%s-%d" % (rulename, cnt) in self.rulenames:
-                cnt += 1
-            rulename = "%s-%d" % (rulename, cnt)
-        self.rulenames.add(rulename)
-
-        return rulename
-
-### Backends for specific SIEMs
-
-class ElasticsearchQuerystringBackend(SingleTextQueryBackend):
-    """Converts Sigma rule into Elasticsearch query string. Only searches, no aggregations."""
-    identifier = "es-qs"
-    active = True
-
-    reEscape = re.compile("([+\\-=!(){}\\[\\]^\"~:/]|\\\\(?![*?])|\\\\u|&&|\\|\\|)")
-    reClear = re.compile("[<>]")
-    andToken = " AND "
-    orToken = " OR "
-    notToken = "NOT "
-    subExpression = "(%s)"
-    listExpression = "(%s)"
-    listSeparator = " "
-    valueExpression = "\"%s\""
-    nullExpression = "NOT _exists_:%s"
-    notNullExpression = "_exists_:%s"
-    mapExpression = "%s:%s"
-    mapListsSpecialHandling = False
 
 class KibanaBackend(ElasticsearchQuerystringBackend, MultiRuleOutputMixin):
     """Converts Sigma rule into Kibana JSON Configuration files (searches only)."""
