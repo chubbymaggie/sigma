@@ -851,6 +851,70 @@ class SplunkBackend(SingleTextQueryBackend):
         else:
             return " | stats %s(%s) as val by %s | search val %s %s" % (agg.aggfunc_notrans, agg.aggfield, agg.groupfield, agg.cond_op, agg.condition)
 
+class WindowsDefenderATPBackend(SingleTextQueryBackend):
+    """Converts Sigma rule into Windows Defender ATP Hunting Queries."""
+    identifier = "wdatp"
+    active = True
+
+    reEscape = re.compile('("|\\\\(?![*?]))')
+    reClear = None
+    andToken = " and "
+    orToken = " or "
+    notToken = "not "
+    subExpression = "(%s)"
+    listExpression = "(%s)"
+    listSeparator = ", "
+    valueExpression = "\"%s\""
+    nullExpression = "isnull(%s)"
+    notNullExpression = "isnotnull(%s)"
+    mapExpression = "%s == %s"
+    mapListsSpecialHandling = True
+    mapListValueExpression = "%s in %s"
+
+    def generate(self, sigmaparser):
+        self.table = None
+        try:
+            self.product = sigmaparser.parsedyaml['logsource']['product']
+            self.service = sigmaparser.parsedyaml['logsource']['service']
+        except KeyError:
+            self.product = None
+            self.service = None
+
+        super().generate(sigmaparser)
+
+    def generateBefore(self, parsed):
+        return "%s | " % self.table
+
+    def generateMapItemNode(self, node):
+        """
+        ATP queries refer to event tables instead of Windows logging event identifiers. This method catches conditions that refer to this field
+        and creates an appropriate table reference.
+        """
+        key, value = node
+        if key == "EventID":
+            if self.product == "windows":
+                if self.service == "sysmon" and value == 1 \
+                    or self.service == "security" and value == 4688:    # Process Execution
+                    self.table = "ProcessCreationEvents"
+                    return None
+                if self.service == "sysmon" and value == 3:      # Network Connection
+                    self.table = "NetworkCommunicationEvents"
+                    return None
+                if self.service == "sysmon" and value == 7:      # Image Load
+                    self.table = "ImageLoadEvents"
+                    return None
+                if self.service == "sysmon" and value == 8:      # Create Remote Thread
+                    self.table = "MiscEvents"
+                    return "ActionType == \"CreateRemoteThread\""
+                if self.service == "sysmon" and value == 11:     # File Creation
+                    self.table = "FileCreationEvents"
+                    return None
+                if self.service == "sysmon" and value == 13:     # Set Registry Value
+                    self.table = "RegistryEvents"
+                    return "ActionType == \"SetValue\""
+
+        return super().generateMapItemNode(node)
+
 class GrepBackend(BaseBackend, QuoteCharMixin):
     """Generates Perl compatible regular expressions and puts 'grep -P' around it"""
     identifier = "grep"
