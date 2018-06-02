@@ -871,6 +871,64 @@ class WindowsDefenderATPBackend(SingleTextQueryBackend):
     mapListsSpecialHandling = True
     mapListValueExpression = "%s in %s"
 
+    def id_mapping(src):
+        """Identity mapping, source == target field name"""
+        return src
+
+    def logontype_mapping(src):
+        """Value mapping for logon events to reduced ATP LogonType set"""
+        logontype_mapping = {
+                2: "Interactive",
+                3: "Network",
+                4: "Batch",
+                5: "Service",
+                7: "Interactive",   # unsure
+                8: "Network",
+                9: "Interactive",   # unsure
+                10: "Remote interactive (RDP) logons",  # really the value?
+                11: "Interactive"
+                }
+        try:
+            return logontype_mapping[src]
+        except KeyError:
+            raise NotSupportedError("Logon type %d unknown and can't be mapped" % src)
+
+    def decompose_user(src_field, src_value):
+        """Decompose domain\user User field of Sysmon events into ATP InitiatingProcessAccountDomain and InititatingProcessAccountName."""
+        reUser = re.compile("^(.*?\\\\(.*)$")
+        m = reUser.match(src_value)
+        if m:
+            domain, user = m.groups()
+            return (("InitiatingProcessAccountDomain", domain), ("InititatingProcessAccountName", user))
+        else:   # assume only user name is given if backslash is missing
+            return (("InititatingProcessAccountName", src_value),)
+
+    fieldMappings = {       # mapping between Sigma and ATP field names
+            # Supported values:
+            # (field name mapping, value mapping): distinct mappings for field name and value, may be a string (direct mapping) or function maps name/value to ATP target value
+            # (mapping function,): receives field name and value as parameter, return list of 2 element tuples (destination field name and value)
+            "AccountName"               : (id_mapping, default_value_mapping),
+            "CommandLine"               : ("ProcessCommandLine", default_value_mapping),
+            "ComputerName"              : (id_mapping, default_value_mapping),
+            "DestinationHostname"       : ("RemoteUrl", default_value_mapping),
+            "DestinationIp"             : ("RemoteIP", default_value_mapping),
+            "DestinationIsIpv6"         : ("RemoteIP has \":\"", True
+            "DestinationPort"           : ("RemotePort", default_value_mapping),
+            "Details"                   : ("RegistryValueData", default_value_mapping),
+            "EventType"                 : ("ActionType", default_value_mapping),
+            "Image"                     : ("FolderPath", default_value_mapping),
+            "ImageLoaded"               : ("FolderPath", default_value_mapping),
+            "LogonType"                 : (id_mapping, logontype_mapping),
+            "NewProcessName"            : ("FolderPath", default_value_mapping),
+            "ObjectValueName"           : ("RegistryValueName", default_value_mapping),
+            "ParentImage"               : ("InitiatingProcessFolderPath", default_value_mapping),
+            "SourceImage"               : ("InitiatingProcessFolderPath", default_value_mapping),
+            "TargetFilename"            : ("FolderPath", default_value_mapping),
+            "TargetImage"               : ("FolderPath", default_value_mapping),
+            "TargetObject"              : ("RegistryKey", default_value_mapping),
+            "User"                      : (decompose_user, ),
+            }
+
     def generate(self, sigmaparser):
         self.table = None
         try:
@@ -909,9 +967,13 @@ class WindowsDefenderATPBackend(SingleTextQueryBackend):
                 if self.service == "sysmon" and value == 11:     # File Creation
                     self.table = "FileCreationEvents"
                     return None
-                if self.service == "sysmon" and value == 13:     # Set Registry Value
+                if self.service == "sysmon" and value == 13 \
+                    or self.service == "security" and value == 4657:    # Set Registry Value
                     self.table = "RegistryEvents"
                     return "ActionType == \"SetValue\""
+                if self.service == "security" and value == 4624:
+                    self.table = "LogonEvents"
+                    return None
 
         return super().generateMapItemNode(node)
 
